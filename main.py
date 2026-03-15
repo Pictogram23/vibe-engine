@@ -10,10 +10,26 @@ RUST_MAIN = "src/main.rs"
 RUST_CARGO = "Cargo.toml"
 API_KEY = os.getenv("GEMINI_API_KEY")
 
-# ページ設定
-st.set_page_config(page_title="Vibe Engine v2.5", layout="wide")
+# テンプレート化されたシステム指示（AIの役割と合言葉を固定）
+SYSTEM_INSTRUCTION = """
+あなたはRustゲーム開発のスペシャリストです。
+ユーザーの指示に基づき、Cargo.toml、src/main.rs、blueprint.md を更新してください。
 
-# APIの初期化
+【厳守ルール】
+1. 出力は必ず以下のセパレーターで区切ること。これら以外の挨拶や解説は一切不要です。
+---CODE_START---
+(Cargo.tomlの内容)
+---CODE_SPLIT---
+(src/main.rsの内容)
+---DOC_START---
+(blueprint.mdの内容)
+
+2. Rustの所有権、型システム、最新のAPI仕様（raylib-rs v5.5等）を正しく扱ってください。
+3. エラー修正の依頼があった場合は、提供されたエラーログを解析し、根本原因を解決してください。
+"""
+
+st.set_page_config(page_title="Vibe Engine v3.0", layout="wide")
+
 if not API_KEY:
     st.error(
         "🔑 APIキーが見つかりません。環境変数 `GEMINI_API_KEY` を設定してください。"
@@ -21,13 +37,14 @@ if not API_KEY:
     st.stop()
 
 client = genai.Client(api_key=API_KEY)
-MODEL_ID = "gemini-2.5-flash"  # 疎通に成功したバージョンを指定
-
+MODEL_ID = "gemini-2.5-flash"
 
 # --- 2. ユーティリティ関数 ---
+
+
 def run_command(command: list):
+    """コマンド実行と結果取得"""
     try:
-        # 初回のビルドは時間がかかるため timeout を長めに設定
         result = subprocess.run(command, capture_output=True, text=True, timeout=120)
         return result.returncode, result.stdout, result.stderr
     except Exception as e:
@@ -35,6 +52,7 @@ def run_command(command: list):
 
 
 def get_current_context():
+    """設計図とコードの現状を取得"""
     context = "### Current Blueprint ###\n"
     if Path(BLUEPRINT_FILE).exists():
         context += Path(BLUEPRINT_FILE).read_text(encoding="utf-8")
@@ -44,19 +62,74 @@ def get_current_context():
     return context
 
 
-# --- 3. Streamlit UI ---
-st.title("🚀 Vibe Coding Engine Manager (v2.5)")
+def process_vibe(instruction_text):
+    """AIへのリクエスト、ファイル更新、ビルドチェックを一括で行う"""
+    status = st.empty()
+    status.info("🧠 Geminiが思考中...")
 
-# サイドバー: プロジェクト設定 & ステータス
+    try:
+        # プロンプトの組み立て（システム指示 + コンテキスト + 個別指示）
+        full_req = f"{SYSTEM_INSTRUCTION}\n\n{get_current_context()}\n\n【指示】\n{instruction_text}"
+
+        response = client.models.generate_content(model=MODEL_ID, contents=full_req)
+        res_text = response.text if response and response.text else ""
+
+        with st.expander("AI Raw Output", expanded=False):
+            st.code(res_text)
+
+        if "---CODE_START---" in res_text:
+            status.info("💾 ファイルを同期中...")
+            parts = res_text.split("---CODE_START---")[1]
+            cargo_content = parts.split("---CODE_SPLIT---")[0].strip()
+            main_content = (
+                parts.split("---CODE_SPLIT---")[1].split("---DOC_START---")[0].strip()
+            )
+            doc_content = res_text.split("---DOC_START---")[1].strip()
+
+            Path(RUST_CARGO).write_text(cargo_content, encoding="utf-8")
+            Path(RUST_MAIN).write_text(main_content, encoding="utf-8")
+            Path(BLUEPRINT_FILE).write_text(doc_content, encoding="utf-8")
+
+            st.success("✅ ファイルを更新しました！")
+
+            status.info("🛠️ ビルドチェック中...")
+            code, out, err = run_command(["cargo", "check"])
+
+            if code == 0:
+                st.success("🚀 ビルド成功！")
+                st.session_state.messages.append(
+                    {
+                        "role": "assistant",
+                        "content": "実装が完了しました。`cargo run` で確認してください！",
+                    }
+                )
+            else:
+                st.error("⚠️ ビルドエラーが発生しました。")
+                st.code(err)
+                # エラー内容を保持して自動修正ボタンを有効化
+                st.session_state.last_error = err
+                st.session_state.messages.append(
+                    {
+                        "role": "assistant",
+                        "content": "ビルドエラーを検知しました。下の「自動修正」ボタンで直せます。",
+                    }
+                )
+        else:
+            st.warning("⚠️ フォーマットエラー。生回答を確認してください。")
+
+    except Exception as e:
+        st.error(f"❌ エラー: {e}")
+
+    status.empty()
+
+
+# --- 3. Streamlit UI ---
+
 with st.sidebar:
-    st.header("⚙️ システム状態")
+    st.header("⚙️ System")
     if st.button("📡 Gemini疎通テスト"):
-        with st.spinner("通信中..."):
-            try:
-                res = client.models.generate_content(model=MODEL_ID, contents="Hello!")
-                st.success("✅ 通信成功")
-            except Exception as e:
-                st.error(f"❌ エラー: {e}")
+        res = client.models.generate_content(model=MODEL_ID, contents="Hello!")
+        st.success("OK")
 
     st.divider()
     st.header("📂 Project Setup")
@@ -64,142 +137,51 @@ with st.sidebar:
         proj_name = st.text_input("Project Name", "vibe_game")
         genre = st.selectbox("Genre", ["2D Action", "RPG", "Bullet Hell", "Adventure"])
         desc = st.text_area("Description", "A simple game.")
-
         col_w, col_h = st.columns(2)
         w_size = col_w.number_input("Width", 1280)
         h_size = col_h.number_input("Height", 720)
         fps = st.slider("Target FPS", 30, 144, 60)
+        if st.form_submit_button("Initialize Project"):
+            if not Path(RUST_CARGO).exists():
+                run_command(["cargo", "init"])
+            blueprint = f"# Project: {proj_name}\n## Vision\n- Genre: {genre}\n- Desc: {desc}\n\n## Specs\n- Window: {w_size}x{h_size}\n- FPS: {fps}\n\n## Log\n- [x] Init"
+            Path(BLUEPRINT_FILE).write_text(blueprint, encoding="utf-8")
+            st.rerun()
 
-        init_btn = st.form_submit_button("Initialize Project")
-
-    if init_btn:
-        if not Path(RUST_CARGO).exists():
-            run_command(["cargo", "init"])
-
-        blueprint_content = f"""# Project: {proj_name}
-## 1. Vision
-- **Genre:** {genre}
-- **Description:** {desc}
-
-## 2. Technical Specs
-- **Window Size:** {w_size}x{h_size}
-- **Target FPS:** {fps}
-- **Language:** Rust
-- **Library:** raylib-rs
-
-## 3. Implementation Log
-- [x] Initial Project Setup
-- [ ] Step 1: Window Initialization
-"""
-        Path(BLUEPRINT_FILE).write_text(blueprint_content, encoding="utf-8")
-        st.success("プロジェクトを初期化しました！")
-        st.rerun()
-
-# メイン表示エリア
 col_doc, col_chat = st.columns([1, 1])
 
 with col_doc:
-    st.subheader("📄 Current Blueprint")
+    st.subheader("📄 Blueprint")
     if Path(BLUEPRINT_FILE).exists():
         st.markdown(Path(BLUEPRINT_FILE).read_text(encoding="utf-8"))
-    else:
-        st.info("サイドバーからプロジェクトを初期化してください。")
 
 with col_chat:
     st.subheader("💬 Vibe Chat")
 
     if "messages" not in st.session_state:
         st.session_state.messages = []
+    if "last_error" not in st.session_state:
+        st.session_state.last_error = None
 
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    if prompt := st.chat_input("実装したい機能を伝えてください"):
+    # ユーザー入力
+    if prompt := st.chat_input("例：画面を青色にして"):
         st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
+        st.rerun()
 
+    # 指示の実行（リラン後に処理）
+    if st.session_state.messages and st.session_state.messages[-1]["role"] == "user":
         with st.chat_message("assistant"):
-            status = st.empty()
-            status.info("🧠 Geminiがコードを生成中...")
+            process_vibe(st.session_state.messages[-1]["content"])
 
-            try:
-                # APIリクエスト
-                full_req = f"""
-                あなたはRustゲーム開発者です。以下のドキュメントとコードを更新してください。
-                
-                {get_current_context()}
-
-                指示: {prompt}
-
-                【出力形式厳守】
-                ---CODE_START---
-                (Cargo.tomlの内容)
-                ---CODE_SPLIT---
-                (src/main.rsの内容)
-                ---DOC_START---
-                (更新されたblueprint.mdの内容)
-                """
-
-                response = client.models.generate_content(
-                    model=MODEL_ID, contents=full_req
-                )
-                res_text = response.text if response and response.text else ""
-
-                # AIの回答をデバッグ用に表示
-                with st.expander("AI Raw Output", expanded=False):
-                    st.code(res_text)
-
-                if "---CODE_START---" in res_text:
-                    status.info("💾 ファイルを更新中...")
-                    parts = res_text.split("---CODE_START---")[1]
-                    cargo_content = parts.split("---CODE_SPLIT---")[0].strip()
-                    main_content = (
-                        parts.split("---CODE_SPLIT---")[1]
-                        .split("---DOC_START---")[0]
-                        .strip()
-                    )
-                    doc_content = res_text.split("---DOC_START---")[1].strip()
-
-                    Path(RUST_CARGO).write_text(cargo_content, encoding="utf-8")
-                    Path(RUST_MAIN).write_text(main_content, encoding="utf-8")
-                    Path(BLUEPRINT_FILE).write_text(doc_content, encoding="utf-8")
-
-                    st.success("✅ ファイルを更新しました！")
-
-                    # ビルドチェック
-                    status.info("🛠️ Rustビルドチェック中 (cargo check)...")
-                    code, out, err = run_command(["cargo", "check"])
-
-                    if code == 0:
-                        st.success("🚀 ビルド成功！")
-                        st.session_state.messages.append(
-                            {
-                                "role": "assistant",
-                                "content": "実装が完了しました。`cargo run` で確認してください！",
-                            }
-                        )
-                    else:
-                        st.error("⚠️ ビルドエラーが発生しました。修正が必要です。")
-                        st.code(err)
-                        # 自動修正ボタンの出現
-                        if st.button("🛠️ AIでこのエラーを自動修正する"):
-                            fix_prompt = f"先ほどの実装で以下のビルドエラーが出ました。修正して再出力してください。\n\n【エラーログ】\n{err}"
-                            # ここで再度 Gemini へのリクエスト処理を実行するロジックを走らせる
-                        st.session_state.messages.append(
-                            {
-                                "role": "assistant",
-                                "content": "ビルドエラーが発生しました。エラーログを確認してください。",
-                            }
-                        )
-                else:
-                    st.warning(
-                        "⚠️ フォーマットが正しくありません。生回答を確認してください。"
-                    )
-
-            except Exception as e:
-                st.error(f"❌ エラー: {e}")
-
-            status.empty()
-            st.button("画面を更新")
+    # 自動修正ボタン（エラーがある場合のみ表示）
+    if st.session_state.last_error:
+        if st.button("🛠️ AIでこのエラーを自動修正する"):
+            fix_msg = f"以下のビルドエラーを修正してください。\n\n【エラーログ】\n{st.session_state.last_error}"
+            st.session_state.last_error = None  # 一回使ったらクリア
+            with st.chat_message("assistant"):
+                process_vibe(fix_msg)
+            st.rerun()
