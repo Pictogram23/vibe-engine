@@ -183,6 +183,10 @@ with col_chat:
                     else:
                         st.error("⚠️ ビルドエラーが発生しました。修正が必要です。")
                         st.code(err)
+                        # 自動修正ボタンの出現
+                        if st.button("🛠️ AIでこのエラーを自動修正する"):
+                            fix_prompt = f"先ほどの実装で以下のビルドエラーが出ました。修正して再出力してください。\n\n【エラーログ】\n{err}"
+                            # ここで再度 Gemini へのリクエスト処理を実行するロジックを走らせる
                         st.session_state.messages.append(
                             {
                                 "role": "assistant",
