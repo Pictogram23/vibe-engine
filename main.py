@@ -11,9 +11,9 @@ RUST_CARGO = "Cargo.toml"
 API_KEY = os.getenv("GEMINI_API_KEY")
 
 # ページ設定
-st.set_page_config(page_title="Vibe Engine Debugger", layout="wide")
+st.set_page_config(page_title="Vibe Engine v2.5", layout="wide")
 
-# --- 2. APIの初期化と生存確認 ---
+# APIの初期化
 if not API_KEY:
     st.error(
         "🔑 APIキーが見つかりません。環境変数 `GEMINI_API_KEY` を設定してください。"
@@ -21,13 +21,14 @@ if not API_KEY:
     st.stop()
 
 client = genai.Client(api_key=API_KEY)
-MODEL_ID = "gemini-1.5-flash"  # 安定性のために一旦1.5固定
+MODEL_ID = "gemini-2.5-flash"  # 疎通に成功したバージョンを指定
 
 
-# --- 3. ユーティリティ関数 ---
+# --- 2. ユーティリティ関数 ---
 def run_command(command: list):
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=60)
+        # 初回のビルドは時間がかかるため timeout を長めに設定
+        result = subprocess.run(command, capture_output=True, text=True, timeout=120)
         return result.returncode, result.stdout, result.stderr
     except Exception as e:
         return 1, "", str(e)
@@ -43,50 +44,66 @@ def get_current_context():
     return context
 
 
-# --- 4. Streamlit UI ---
-st.title("🚀 Vibe Coding Engine Manager")
+# --- 3. Streamlit UI ---
+st.title("🚀 Vibe Coding Engine Manager (v2.5)")
 
-# サイドバー
+# サイドバー: プロジェクト設定 & ステータス
 with st.sidebar:
     st.header("⚙️ システム状態")
-
-    # 【追加】疎通テストボタン
-    if st.button("📡 Gemini疎通テスト実行"):
+    if st.button("📡 Gemini疎通テスト"):
         with st.spinner("通信中..."):
             try:
-                test_res = client.models.generate_content(
-                    model=MODEL_ID, contents="Hello! Respond with 'Ready to Vibe!'"
-                )
-                if test_res and test_res.text:
-                    st.success(f"通信成功: {test_res.text}")
-                else:
-                    st.warning("通信はしましたが、返答が空でした。")
+                res = client.models.generate_content(model=MODEL_ID, contents="Hello!")
+                st.success("✅ 通信成功")
             except Exception as e:
-                st.error(f"通信エラー: {e}")
+                st.error(f"❌ エラー: {e}")
 
     st.divider()
-    st.header("Project Setup")
+    st.header("📂 Project Setup")
     with st.form("init_project"):
         proj_name = st.text_input("Project Name", "vibe_game")
         genre = st.selectbox("Genre", ["2D Action", "RPG", "Bullet Hell", "Adventure"])
         desc = st.text_area("Description", "A simple game.")
+
+        col_w, col_h = st.columns(2)
+        w_size = col_w.number_input("Width", 1280)
+        h_size = col_h.number_input("Height", 720)
+        fps = st.slider("Target FPS", 30, 144, 60)
+
         init_btn = st.form_submit_button("Initialize Project")
 
     if init_btn:
         if not Path(RUST_CARGO).exists():
             run_command(["cargo", "init"])
-        blueprint_content = f"# Project: {proj_name}\n## 1. Vision\n- Genre: {genre}\n- Description: {desc}\n\n## 2. Implementation Log\n- [x] Initial Setup\n- [ ] Step 1: Window"
+
+        blueprint_content = f"""# Project: {proj_name}
+## 1. Vision
+- **Genre:** {genre}
+- **Description:** {desc}
+
+## 2. Technical Specs
+- **Window Size:** {w_size}x{h_size}
+- **Target FPS:** {fps}
+- **Language:** Rust
+- **Library:** raylib-rs
+
+## 3. Implementation Log
+- [x] Initial Project Setup
+- [ ] Step 1: Window Initialization
+"""
         Path(BLUEPRINT_FILE).write_text(blueprint_content, encoding="utf-8")
-        st.success("初期化完了！")
+        st.success("プロジェクトを初期化しました！")
         st.rerun()
 
-# メイン表示
+# メイン表示エリア
 col_doc, col_chat = st.columns([1, 1])
 
 with col_doc:
-    st.subheader("📄 Blueprint")
+    st.subheader("📄 Current Blueprint")
     if Path(BLUEPRINT_FILE).exists():
         st.markdown(Path(BLUEPRINT_FILE).read_text(encoding="utf-8"))
+    else:
+        st.info("サイドバーからプロジェクトを初期化してください。")
 
 with col_chat:
     st.subheader("💬 Vibe Chat")
@@ -98,30 +115,44 @@ with col_chat:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    if prompt := st.chat_input("次は何を実装する？"):
+    if prompt := st.chat_input("実装したい機能を伝えてください"):
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
 
         with st.chat_message("assistant"):
-            status_box = st.empty()
-            status_box.info("🧠 Geminiが考え中です...")
+            status = st.empty()
+            status.info("🧠 Geminiがコードを生成中...")
 
             try:
                 # APIリクエスト
-                response = client.models.generate_content(
-                    model=MODEL_ID,
-                    contents=f"{get_current_context()}\n\n指示: {prompt}\n\n必ず ---CODE_START---, ---CODE_SPLIT---, ---DOC_START--- の形式で出力してください。",
-                )
+                full_req = f"""
+                あなたはRustゲーム開発者です。以下のドキュメントとコードを更新してください。
+                
+                {get_current_context()}
 
+                指示: {prompt}
+
+                【出力形式厳守】
+                ---CODE_START---
+                (Cargo.tomlの内容)
+                ---CODE_SPLIT---
+                (src/main.rsの内容)
+                ---DOC_START---
+                (更新されたblueprint.mdの内容)
+                """
+
+                response = client.models.generate_content(
+                    model=MODEL_ID, contents=full_req
+                )
                 res_text = response.text if response and response.text else ""
 
-                # 【重要】AIの回答をそのまま表示（パース失敗しても見えるように）
-                st.markdown("### AIの生回答:")
-                st.code(res_text)
+                # AIの回答をデバッグ用に表示
+                with st.expander("AI Raw Output", expanded=False):
+                    st.code(res_text)
 
                 if "---CODE_START---" in res_text:
-                    status_box.info("💾 ファイル書き込み中...")
+                    status.info("💾 ファイルを更新中...")
                     parts = res_text.split("---CODE_START---")[1]
                     cargo_content = parts.split("---CODE_SPLIT---")[0].strip()
                     main_content = (
@@ -135,24 +166,36 @@ with col_chat:
                     Path(RUST_MAIN).write_text(main_content, encoding="utf-8")
                     Path(BLUEPRINT_FILE).write_text(doc_content, encoding="utf-8")
 
-                    st.success("✅ ファイル更新成功！")
+                    st.success("✅ ファイルを更新しました！")
 
-                    status_box.info("🛠️ Rustビルドチェック中...")
+                    # ビルドチェック
+                    status.info("🛠️ Rustビルドチェック中 (cargo check)...")
                     code, out, err = run_command(["cargo", "check"])
+
                     if code == 0:
                         st.success("🚀 ビルド成功！")
+                        st.session_state.messages.append(
+                            {
+                                "role": "assistant",
+                                "content": "実装が完了しました。`cargo run` で確認してください！",
+                            }
+                        )
                     else:
-                        st.error("⚠️ ビルドエラー")
+                        st.error("⚠️ ビルドエラーが発生しました。修正が必要です。")
                         st.code(err)
+                        st.session_state.messages.append(
+                            {
+                                "role": "assistant",
+                                "content": "ビルドエラーが発生しました。エラーログを確認してください。",
+                            }
+                        )
                 else:
-                    st.warning("⚠️ 指定フォーマットが見つかりませんでした。")
-
-                st.session_state.messages.append(
-                    {
-                        "role": "assistant",
-                        "content": "回答終了。内容を確認してください。",
-                    }
-                )
+                    st.warning(
+                        "⚠️ フォーマットが正しくありません。生回答を確認してください。"
+                    )
 
             except Exception as e:
-                st.error(f"❌ 実行エラー: {e}")
+                st.error(f"❌ エラー: {e}")
+
+            status.empty()
+            st.button("画面を更新")
